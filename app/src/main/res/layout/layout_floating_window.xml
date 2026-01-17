@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/floating_bg"
+    android:elevation="8dp"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <!-- 悬浮 UI 按钮 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_toggle_board"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="棋盘"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_calibrate"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="校准"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_scan"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="扫面"
+            android:textSize="12sp" />
+        <Button
+            android:id="@+id/btn_auto_scan"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="auto"
+            android:textSize="12sp" />
+                
+        <Button
+            android:id="@+id/btn_copy_fen"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="换手"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_fp32_int8"
+            android:layout_width="60dp"
+            android:layout_height="40dp"
+            android:text="fp2int8"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_close_floating"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="X" />
+    </LinearLayout>
+
+    <!-- 这个 FrameLayout 可以保留但不再用于显示棋盘 -->
+    <FrameLayout
+        android:id="@+id/container_mini_board"
+        android:layout_width="200dp"
+        android:layout_height="220dp"
+        android:layout_marginTop="5dp"
+        android:visibility="gone"/>
+</LinearLayout>

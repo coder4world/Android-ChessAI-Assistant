@@ -1,0 +1,417 @@
+package com.zfdang.chess.services
+
+import android.app.*
+import android.content.*
+import android.graphics.*
+import android.hardware.display.DisplayManager
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.*
+import android.util.DisplayMetrics // 修正：补全此 import
+import android.util.Log
+import android.view.*
+import android.widget.*
+import com.zfdang.chess.R
+import com.zfdang.chess.utils.*
+import java.io.File
+import java.io.FileOutputStream
+import kotlin.math.abs
+
+// 导入自定义 View
+import com.zfdang.chess.views.MiniBoardView
+import com.zfdang.chess.views.BoardGridOverlayView
+
+class FloatingService : Service() {
+
+    private lateinit var windowManager: WindowManager
+    private lateinit var floatingViewUI: View
+    private lateinit var paramsUI: WindowManager.LayoutParams
+    
+    private var mediaProjectionIntent: Intent? = null
+    private var mediaProjection: MediaProjection? = null
+    private var imageReader: ImageReader? = null
+    private var miniBoard: MiniBoardView? = null
+
+    // 绿点网格图层
+    private var gridOverlayView: BoardGridOverlayView? = null
+    private var isCapturing = false
+
+    override fun onCreate() {
+        super.onCreate()
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        startAsForeground()
+        showFloatingUI()
+    }
+
+    private fun toggleBoardVisibility() {
+        if (miniBoard == null) {
+            miniBoard = MiniBoardView(this)
+            val boardParams = WindowManager.LayoutParams(
+                450, 500,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = paramsUI.x
+                y = paramsUI.y + 200
+            }
+            windowManager.addView(miniBoard, boardParams)
+        } else {
+            miniBoard?.visibility = if (miniBoard?.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+    }
+
+    private fun startAsForeground() {
+        val channelId = "capture_service"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(NotificationChannel(channelId, "象棋服务", NotificationManager.IMPORTANCE_LOW))
+        }
+        val notification = Notification.Builder(this, channelId)
+            .setContentTitle("象棋辅助采集开启")
+            .setSmallIcon(R.drawable.ic_launcher)
+            .build()
+        startForeground(1001, notification)
+    }
+
+    private fun showFloatingUI() {
+        floatingViewUI = LayoutInflater.from(this).inflate(R.layout.layout_floating_window, null)
+        
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+
+        paramsUI = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 100; y = 100
+        }
+
+        floatingViewUI.setOnTouchListener(object : View.OnTouchListener {
+            private var initialX = 0; private var initialY = 0
+            private var initialTouchX = 0f; private var initialTouchY = 0f
+
+            override fun onTouch(v: View, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = paramsUI.x; initialY = paramsUI.y
+                        initialTouchX = event.rawX; initialTouchY = event.rawY
+                        return false 
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = (event.rawX - initialTouchX).toInt()
+                        val dy = (event.rawY - initialTouchY).toInt()
+                        if (abs(dx) > 10 || abs(dy) > 10) { 
+                            paramsUI.x = initialX + dx
+                            paramsUI.y = initialY + dy
+                            windowManager.updateViewLayout(floatingViewUI, paramsUI)
+                            return true
+                        }
+                    }
+                }
+                return false
+            }
+        })
+
+        floatingViewUI.findViewById<Button>(R.id.btn_calibrate).setOnClickListener { startCalibration() }
+        floatingViewUI.findViewById<Button>(R.id.btn_scan).setOnClickListener { captureAndSaveSamples() }
+        floatingViewUI.findViewById<Button>(R.id.btn_toggle_board)?.setOnClickListener { 
+            toggleBoardVisibility()  
+            hideGridOverlay()
+         }
+        floatingViewUI.findViewById<Button>(R.id.btn_close_floating).setOnClickListener { 
+            hideGridOverlay()
+            stopSelf() 
+        }
+
+        windowManager.addView(floatingViewUI, paramsUI)
+    }
+
+    private fun hideGridOverlay() {
+        gridOverlayView?.let {
+            it.visibility = View.GONE
+            try { windowManager.removeView(it) } catch (e: Exception) {}
+            gridOverlayView = null
+        }
+    }
+
+    private fun startCalibration() {
+        // 清理旧的绿点层
+        hideGridOverlay()
+
+        val calibrationView = CalibrationOverlayView(this) { finalRect ->
+            // 校准逻辑
+            BoardConfig.setRect(finalRect, this)
+            val newGrid = BoardConfig.getGrid()
+            
+                if (newGrid != null) {
+                    //val newOverlay = BoardGridOverlayView(this, newGrid)
+                    // val gridParams = WindowManager.LayoutParams(
+                    //     WindowManager.LayoutParams.MATCH_PARENT,
+                    //     WindowManager.LayoutParams.MATCH_PARENT,
+                    //     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                    //         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+                    //     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or 
+                    //     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    //     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    //     PixelFormat.TRANSLUCENT
+                    // )
+                    // gridParams.gravity = Gravity.TOP or Gravity.START
+                
+                    // val gridParams = WindowManager.LayoutParams(
+                    //     WindowManager.LayoutParams.MATCH_PARENT,
+                    //     WindowManager.LayoutParams.MATCH_PARENT,
+                    //     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                    //         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+                    //     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or 
+                    //     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    //     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or // 延伸至屏幕外
+                    //     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,  // 关键：允许窗口延伸到屏幕之外（忽略状态栏限制）
+                    //     PixelFormat.TRANSLUCENT
+                    // )
+                    // // 强制坐标原点为绝对物理 (0,0)
+                    // gridParams.gravity = Gravity.TOP or Gravity.START
+                    // gridParams.x = 0
+                    // gridParams.y = 0
+
+                    val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+                    val statusBarHeight = if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else 0
+
+                    // var statusBarHeight = 0
+                    // val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+                    // if (resourceId > 0) {
+                    //     statusBarHeight = context.resources.getDimensionPixelSize(resourceId)
+                    // }
+
+                     Toast.makeText(this, "statusBarHeight:$statusBarHeight", Toast.LENGTH_SHORT).show()
+
+                    // 2. 创建一个临时的“视觉Grid”，把 Y 轴坐标向上提，抵消掉 View 的下移
+                    val visualYLines = IntArray(10) { i -> newGrid.yLines[i] - statusBarHeight }
+                    val visualGrid = AutoBoardLocator.Grid(newGrid.xLines, visualYLines)
+
+                    // 3. 使用这个视觉 Grid 来显示
+                    val newOverlay = BoardGridOverlayView(this, visualGrid)
+                    
+                    val gridParams = WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or 
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, // 恢复常规全屏 Flag
+                        PixelFormat.TRANSLUCENT
+                    )
+                    gridParams.gravity = Gravity.TOP or Gravity.START
+
+
+                windowManager.addView(newOverlay, gridParams)
+                gridOverlayView = newOverlay
+                
+                // 8秒后自动消失，避免一直留在屏幕上
+                Handler(Looper.getMainLooper()).postDelayed({
+                    hideGridOverlay()
+                }, 300000)
+            }
+            Toast.makeText(this, "校准完成，绿点已对准", Toast.LENGTH_SHORT).show()
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            paramsUI.type,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        
+        windowManager.addView(calibrationView, params)
+    }
+
+
+    private fun captureAndSaveSamples() {
+        // 1. 防止重复触发
+        if (isCapturing) return
+        isCapturing = true
+
+    // --- 新增逻辑：如果内存中没数据，尝试从文件读取 ---
+        if (!BoardConfig.isReady) {
+            val loaded = BoardConfig.loadFromCache(this)
+            if (!loaded) {
+                Toast.makeText(this, "未找到校准缓存，请先点击校准", Toast.LENGTH_SHORT).show()
+                isCapturing = false
+                return
+            }
+        }
+
+
+        val data = mediaProjectionIntent ?: run {
+            isCapturing = false
+            return
+        }
+        
+        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+        // 2. 获取真实的物理全屏分辨率
+        val metrics = DisplayMetrics()
+        windowManager.defaultDisplay.getRealMetrics(metrics) 
+        val screenWidth = metrics.widthPixels
+        val screenHeight = metrics.heightPixels
+
+        // 3. 初始化 ImageReader (缓冲区设为 2 帧即可)
+        val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+        imageReader = reader
+
+        // 4. 获取投影对象
+        val projection = projectionManager.getMediaProjection(Activity.RESULT_OK, data)
+        mediaProjection = projection
+
+        // 设置回调
+        reader.setOnImageAvailableListener({ r ->
+            // --- 核心修复：一旦拿到有效的图，立即注销监听器，防止第二次回调 ---
+            val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            r.setOnImageAvailableListener(null, null) 
+
+            try {
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val rowStride = plane.rowStride
+                val pixelStride = plane.pixelStride
+                
+                // 解决 rowStride 填充问题导致的花屏
+                val rawBitmap = Bitmap.createBitmap(rowStride / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
+                rawBitmap.copyPixelsFromBuffer(buffer)
+                
+                // 裁剪为屏幕真实尺寸
+                val cleanBitmap = Bitmap.createBitmap(rawBitmap, 0, 0, screenWidth, screenHeight)
+                rawBitmap.recycle()
+                
+                // 识别与保存逻辑
+                val fen = BoardRecognizer.recognize(cleanBitmap)
+                
+                Handler(Looper.getMainLooper()).post {
+                    miniBoard?.setFen(fen)
+                    if (BoardConfig.isReady) {
+                        SampleCollector.saveSamples(this@FloatingService, cleanBitmap, BoardConfig.getGrid()!!)
+                        Toast.makeText(this@FloatingService, "识别并保存样本成功", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@FloatingService, "请先校准棋盘", Toast.LENGTH_SHORT).show()
+                    }
+                    // 完成任务，重置标记
+                    isCapturing = false
+                }
+            } catch (e: Exception) {
+                Log.e("Capture", "Error processing image: ${e.message}")
+                isCapturing = false
+            } finally {
+                image.close()
+                // 5. 任务完成，彻底释放资源，否则会导致屏幕采集图标一直留在状态栏
+                stopCaptureResources()
+            }
+        }, Handler(Looper.getMainLooper()))
+
+        // 开启虚拟显示
+        projection.createVirtualDisplay(
+            "Capture", screenWidth, screenHeight, metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
+        )
+    }
+
+    /**
+    * 彻底释放屏幕投影相关的资源
+    */
+    private fun stopCaptureResources() {
+        try {
+            mediaProjection?.stop()
+            mediaProjection = null
+            imageReader?.close()
+            imageReader = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+
+
+    // private fun captureAndSaveSamples() {
+    //     val data = mediaProjectionIntent ?: return
+    //     val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    //     mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, data)
+
+    //    // if (miniBoard == null) { toggleBoardVisibility() }
+
+    //     // 获取真实的物理全屏分辨率
+    //     val metrics = DisplayMetrics()
+    //     windowManager.defaultDisplay.getRealMetrics(metrics) 
+    //     val screenWidth = metrics.widthPixels
+    //     val screenHeight = metrics.heightPixels
+
+    //     imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+    //     mediaProjection?.createVirtualDisplay(
+    //         "Capture", screenWidth, screenHeight, metrics.densityDpi,
+    //         DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null
+    //     )
+
+    //     imageReader?.setOnImageAvailableListener({ reader ->
+    //         val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            
+    //         val plane = image.planes[0]
+    //         val buffer = plane.buffer
+    //         val rowStride = plane.rowStride
+    //         val pixelStride = plane.pixelStride
+    //         val rawBitmap = Bitmap.createBitmap(rowStride / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
+    //         rawBitmap.copyPixelsFromBuffer(buffer)
+            
+    //         val cleanBitmap = Bitmap.createBitmap(rawBitmap, 0, 0, screenWidth, screenHeight)
+    //         rawBitmap.recycle()
+    //         image.close()
+
+    //         mediaProjection?.stop()
+    //         mediaProjection = null
+
+    //         val fen = BoardRecognizer.recognize(cleanBitmap)
+            
+    //         Handler(Looper.getMainLooper()).post {
+    //             miniBoard?.setFen(fen)
+    //             if (BoardConfig.isReady) {
+    //                 SampleCollector.saveSamples(this@FloatingService, cleanBitmap, BoardConfig.getGrid()!!)
+    //                 Toast.makeText(this@FloatingService, "识别并保存样本成功", Toast.LENGTH_SHORT).show()
+    //             } else {
+    //                 Toast.makeText(this@FloatingService, "请先校准棋盘", Toast.LENGTH_SHORT).show()
+    //             }
+    //         }
+    //     }, Handler(Looper.getMainLooper()))
+    // }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<Intent>(EXTRA_DATA)
+        }
+        if (data != null) mediaProjectionIntent = data
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?) = null
+
+    override fun onDestroy() {
+        super.onDestroy()
+        hideGridOverlay()
+        if (::floatingViewUI.isInitialized) {
+            windowManager.removeView(floatingViewUI)
+        }
+    }
+
+    companion object {
+        const val EXTRA_DATA = "data"
+        const val EXTRA_RESULT_CODE = "result_code"
+    }
+}

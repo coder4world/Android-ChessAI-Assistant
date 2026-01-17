@@ -1,0 +1,173 @@
+package com.zfdang.chess.utils
+
+import android.util.Log
+import org.petero.droidfish.engine.PikafishExternalEngine
+import org.petero.droidfish.player.EngineListener
+import java.util.concurrent.Semaphore
+
+
+import java.util.concurrent.TimeUnit
+
+
+
+object PikafishEngine {
+    private var engine: PikafishExternalEngine? = null
+    private var lastBestMove: String? = null
+    private val semaphore = Semaphore(0)
+    
+    @Volatile
+    private var isUciReady = false // 记录是否收到 uciok
+    @Volatile
+    private var isNnueReady = false // 记录是否收到 readyok
+
+    private val listener = object : EngineListener {
+        override fun notifyEngineInitialized() {
+            // 引擎进程拉起后，第一步永远是 uci
+            engine?.writeLineToEngine("uci")
+        }
+
+        override fun notifySearchResult(searchId: Int, bestMove: String?, nextPonderMove: String?) {
+            Log.d("Pikafish", "收到最佳走法: $bestMove")
+            bestMove?.let {
+                lastBestMove = it
+                semaphore.release()
+            }
+        }
+
+        override fun notifyEvalResult(searchId: Int, eval: Float) {}
+        
+        override fun notifyEngineName(engineName: String?) {
+            Log.d("Pikafish", "引擎名称: $engineName")
+            // 通常收到名称说明通信正常了
+            isUciReady = true 
+        }
+
+        override fun reportEngineError(errMsg: String?) {
+            Log.e("Pikafish", "引擎报错: $errMsg")
+        }
+    }
+
+    /**
+     * 初始化引擎
+     */
+    fun initEngine(context: android.content.Context) {
+        if (engine == null) {
+            val workDir = context.filesDir.absolutePath
+            engine = PikafishExternalEngine(workDir, listener)
+            
+            // 模拟原版序列
+            engine?.writeLineToEngine("uci")
+            
+            // 设置 NNUE 路径 (触发 PikafishExternalEngine 的路径转换)
+            // 这里的 optionName "EvalFile" 大小写需与皮卡鱼源码对应，通常为 "evalfile" 或 "EvalFile"
+            engine?.setOption("evalfile", "libpikafish.nnue.so")
+            
+            // 针对皮卡鱼的优化参数
+            engine?.setOption("Threads", "1")
+            engine?.setOption("Hash", "16")
+
+            // 关键：触发加载权重文件
+            engine?.writeLineToEngine("isready")
+            
+            Log.d("Pikafish", "初始化指令已全部发出，等待引擎加载 NNUE...")
+        }
+    }
+
+    @Synchronized
+    fun getNextMove(fen: String): String? {
+        val ctx = com.zfdang.chess.ChessApp.getContext()
+        if (engine == null) initEngine(ctx)
+
+        lastBestMove = null
+        semaphore.drainPermits()
+
+        // 1. 极其重要的 FEN 裁剪
+        // 皮卡鱼对 FEN 结尾的 60 步规则和回合数非常敏感，只保留 [棋盘] 和 [走子方] 是最稳的
+        val cleanFen = fen.split(" ").take(2).joinToString(" ")
+
+        // 2. 交互序列
+        engine?.writeLineToEngine("stop")           // 停止可能存在的计算
+        engine?.writeLineToEngine("isready")        // 强制同步点
+        engine?.writeLineToEngine("position fen $cleanFen")
+        
+        // 3. 开始搜索
+        // 对于 NNUE 引擎，movetime 如果太短（如 100ms），可能还没搜出结果就停了
+        engine?.writeLineToEngine("go movetime 1000")
+
+        Log.d("Pikafish", "发送搜索指令: position fen $cleanFen")
+
+        // 4. 等待
+        return if (semaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+            lastBestMove
+        } else {
+            Log.e("Pikafish", "获取走法超时！")
+            // 尝试再次发送 isready 看看引擎是否还活着
+            engine?.writeLineToEngine("isready")
+            null
+        }
+    }
+}
+// object PikafishEngine {
+
+//     private var engine: PikafishExternalEngine? = null
+//     private var lastBestMove: String? = null
+//     private val semaphore = Semaphore(0)
+
+//     private val listener = object : EngineListener {
+
+//         override fun notifyEngineInitialized() {
+//             Log.d("Pikafish", "Engine initialized")
+//         }
+
+//         override fun notifySearchResult(
+//             searchId: Int,
+//             bestMove: String?,
+//             nextPonderMove: String?
+//         ) {
+//             bestMove?.let {
+//                 lastBestMove = it
+//                 semaphore.release()
+//             }
+//         }
+
+//         override fun notifyEvalResult(searchId: Int, eval: Float) {
+//             // 可选
+//         }
+
+//         override fun notifyEngineName(engineName: String?) {
+//             Log.d("Pikafish", "Engine connected: $engineName")
+//         }
+
+//         override fun reportEngineError(errMsg: String?) {
+//             Log.e("Pikafish", "Engine error: $errMsg")
+//         }
+//     }
+
+
+//     private fun ensureEngine(context: android.content.Context) {
+//         if (engine == null) {
+//             val workDir = context.filesDir.absolutePath
+//             engine = PikafishExternalEngine(workDir, listener)
+//             engine?.setOption("Hash", "16")
+//             engine?.setOption("Threads", "1")
+//         }
+//     }
+
+//     fun getNextMove(fen: String): String? {
+//         val ctx = com.zfdang.chess.ChessApp.getContext()
+//         ensureEngine(ctx)
+
+//         lastBestMove = null
+//         semaphore.drainPermits()
+
+//         engine?.writeLineToEngine("position fen $fen")
+//         engine?.writeLineToEngine("go movetime 500")
+
+//         return if (semaphore.tryAcquire(2, TimeUnit.SECONDS)) {
+//             lastBestMove
+//         } else {
+//             Log.e("Pikafish", "Engine timeout")
+//             null
+//         }
+//     }
+// }
